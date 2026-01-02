@@ -661,7 +661,15 @@
         const ctx = canvas.getContext('2d');
         const W = canvas.width, R = W / 2 - 10;
         const overlayImg = new Image();
-        overlayImg.src = 'image.b64';
+        
+        // 🔹 Base64 को file से load करें
+fetch('image.b64')
+  .then(res => res.text())
+  .then(b64 => {
+      overlayImg.src = b64.trim();
+      overlayImg.onload = () => drawWheel(0);
+  })
+  .catch(err => console.error("Image load error:", err));
 
         function drawWheel(rot = 0) {
             ctx.clearRect(0, 0, W, W);
