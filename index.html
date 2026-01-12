@@ -1354,7 +1354,7 @@ function selectChip(amt) {
 function startBettingRepeat(num) { 
   if (state.timer <= 15 || !state.betting || !state.uid) return; 
   PLACE_BET(num); 
-  betRepeatInterval = setInterval(() => PLACE_BET(num), 200); 
+  betRepeatInterval = setInterval(() => PLACE_BET(num), 150); 
 }
 
 function stopBettingRepeat() { 
