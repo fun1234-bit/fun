@@ -260,7 +260,7 @@ body, html { width: 100%; height: 100%; background-color: #000; overflow: hidden
  left: 50%;
  transform: translate(-50%, 150%);  
  background-size: 100% 100%; 
- z-index: 50;                 
+ z-index: 100;                 
  pointer-events: none;
  cursor: pointer;
  display: flex; 
@@ -486,7 +486,7 @@ canvas#wheel {
 }
 
 .animate-now {
-  animation: rotateBall 1s steps(1) 8 forwards; 
+  animation: rotateBall 1s steps(2) 8 forwards; 
 }
 
 @keyframes rotateBall {
@@ -586,7 +586,7 @@ canvas#wheel {
   text-align: center; 
   position: relative; 
   cursor: pointer; 
-  
+  z-index: 999999
 }
 
 .number-box .num { 
@@ -603,7 +603,7 @@ canvas#wheel {
   background-blend-mode: overlay;
   box-shadow: 0 0 15px rgba(255,215,0,0.8), inset 0 0 15px rgba(0,0,0,0.95);
   margin: 0 auto;
-               
+       z-index: 999999;         
 }
 
 .number-box .bet-placed { 
@@ -623,7 +623,7 @@ canvas#wheel {
   align-items: center;
   justify-content: center;
   min-width: 40px;
-          
+       z-index: 999999;         
 }
 
 .status-bar { 
@@ -1212,9 +1212,18 @@ async function triggerNewRound() {
     await timerDoc.set({ 
       timerStartTime: firebase.firestore.FieldValue.serverTimestamp(), 
       status: "BET", 
-      bets: {} 
+      bets: {},
+      result: null
     }, { merge: true }); 
-  } catch (e) {}
+    
+    // लोकल बेट्स रीसेट करें
+    state.bets.fill(0);
+    state.betHistory = [];
+    updateUI();
+    
+  } catch (e) {
+    console.error("New round error:", e);
+  }
 }
 
 function playSpinSound() {
@@ -1301,8 +1310,26 @@ async function STOP__AND_SHOW_RESULT(result) {
   if (!state.resultProcessed && state.uid && state.bets[result] > 0) {
     state.resultProcessed = true;
     const winAmount = state.bets[result] * 9;
-    rtdb.ref("users/uid/" + state.uid + "/coins").transaction((c) => (c || 0) + winAmount);
-    document.getElementById('gameStatus').textContent = "WON " + winAmount + " COINS!";
+    
+    try {
+      // Realtime Database में coins जोड़ें
+      const userRef = rtdb.ref("users/uid/" + state.uid);
+      const snapshot = await userRef.once('value');
+      const currentCoins = snapshot.val().coins || 0;
+      
+      await userRef.update({
+        coins: currentCoins + winAmount
+      });
+      
+      // लोकल state अपडेट करें
+      state.coins += winAmount;
+      document.getElementById('gameStatus').textContent = "WON " + winAmount + " COINS!";
+      document.getElementById('coins').textContent = state.coins;
+      
+    } catch (error) {
+      console.error("Win update error:", error);
+      document.getElementById('gameStatus').textContent = "Error updating coins!";
+    }
   } else if (state.uid) { 
     document.getElementById('gameStatus').textContent = "BET FINISHED"; 
   }
@@ -1354,7 +1381,7 @@ function selectChip(amt) {
 function startBettingRepeat(num) { 
   if (state.timer <= 15 || !state.betting || !state.uid) return; 
   PLACE_BET(num); 
-  betRepeatInterval = setInterval(() => PLACE_BET(num), 150); 
+  betRepeatInterval = setInterval(() => PLACE_BET(num), 200); 
 }
 
 function stopBettingRepeat() { 
@@ -1364,34 +1391,67 @@ function stopBettingRepeat() {
 async function PLACE_BET(n) {
   if (state.timer > 15 && state.coins >= state.selectedAmount && state.uid) {
     const amt = state.selectedAmount;
-    rtdb.ref("users/uid/" + state.uid + "/coins").transaction((c) => {
-      if (c >= amt) return c - amt; 
-      else return;
-    }, (err, committed) => {
-      if (committed) {
-        state.bets[n] += amt; 
-        state.betHistory.push({n, amt});
-        timerDoc.update({ [`bets.${n}`]: firebase.firestore.FieldValue.increment(amt) });
-        
-        if(state.soundEnabled) { 
-          const cs = document.getElementById('clickSound'); 
-          cs.pause(); 
-          cs.currentTime = 0; 
-          cs.play().catch(()=>{}); 
-        }
-        updateUI();
+    
+    try {
+      // 1. पहले Firestore में बेट रिकॉर्ड करें
+      const timerDocRef = db.collection("settings").doc("timer");
+      await timerDocRef.update({
+        [`bets.${n}`]: firebase.firestore.FieldValue.increment(amt)
+      });
+      
+      // 2. फिर user के coins काटें
+      const newCoins = state.coins - amt;
+      await rtdb.ref("users/uid/" + state.uid).update({
+        coins: newCoins
+      });
+      
+      // 3. लोकल state अपडेट करें
+      state.coins = newCoins;
+      state.bets[n] += amt;
+      state.betHistory.push({n, amt});
+      
+      // 4. साउंड प्ले करें
+      if(state.soundEnabled) { 
+        const cs = document.getElementById('clickSound'); 
+        cs.currentTime = 0; 
+        cs.play().catch(()=>{}); 
       }
-    });
+      
+      // 5. UI अपडेट करें
+      updateUI();
+      
+    } catch (error) {
+      console.error("Bet placement error:", error);
+      document.getElementById('gameStatus').textContent = "Bet failed, try again";
+    }
   }
 }
 
 async function cancelLastBet() {
   if (state.timer > 15 && state.betHistory.length > 0 && state.uid) {
     const last = state.betHistory.pop();
-    rtdb.ref("users/uid/" + state.uid + "/coins").transaction(c => (c || 0) + last.amt);
-    state.bets[last.n] -= last.amt;
-    timerDoc.update({ [`bets.${last.n}`]: firebase.firestore.FieldValue.increment(-last.amt) });
-    updateUI();
+    
+    try {
+      // 1. Firestore से बेट हटाएं
+      const timerDocRef = db.collection("settings").doc("timer");
+      await timerDocRef.update({
+        [`bets.${last.n}`]: firebase.firestore.FieldValue.increment(-last.amt)
+      });
+      
+      // 2. User के coins वापस दें
+      const newCoins = state.coins + last.amt;
+      await rtdb.ref("users/uid/" + state.uid).update({
+        coins: newCoins
+      });
+      
+      // 3. लोकल state अपडेट करें
+      state.coins = newCoins;
+      state.bets[last.n] -= last.amt;
+      updateUI();
+      
+    } catch (error) {
+      console.error("Cancel bet error:", error);
+    }
   }
 }
 
@@ -1399,16 +1459,41 @@ async function cancelAllBets() {
   if (state.timer > 15 && state.uid) {
     let total = state.bets.reduce((a, b) => a + b, 0);
     if (total > 0) {
-      rtdb.ref("users/uid/" + state.uid + "/coins").transaction(c => (c || 0) + total);
-      state.bets.fill(0); 
-      state.betHistory = []; 
-      timerDoc.update({ bets: {} }); 
-      updateUI();
+      try {
+        // सभी बेट्स Firestore से हटाएं
+        const timerDocRef = db.collection("settings").doc("timer");
+        const timerSnap = await timerDocRef.get();
+        const currentBets = timerSnap.data().bets || {};
+        
+        let updateData = {};
+        for (let i = 0; i < 10; i++) {
+          if (state.bets[i] > 0) {
+            updateData[`bets.${i}`] = firebase.firestore.FieldValue.increment(-state.bets[i]);
+          }
+        }
+        
+        if (Object.keys(updateData).length > 0) {
+          await timerDocRef.update(updateData);
+        }
+        
+        // User के coins वापस दें
+        const newCoins = state.coins + total;
+        await rtdb.ref("users/uid/" + state.uid).update({
+          coins: newCoins
+        });
+        
+        // लोकल state रीसेट करें
+        state.coins = newCoins;
+        state.bets.fill(0);
+        state.betHistory = [];
+        updateUI();
+        
+      } catch (error) {
+        console.error("Cancel all bets error:", error);
+      }
     }
   }
 }
-
-// सेंड पॉपअप फंक्शन्स को हटा दिया क्योंकि सेंड बटन हट गया है
 
 // ============================
 // WHEEL DRAWING
@@ -1528,4 +1613,4 @@ window.addEventListener('resize', function() {
 })();
 </script>
 </body>
-</html>
+  </html>
